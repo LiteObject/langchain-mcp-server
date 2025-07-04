@@ -8,9 +8,11 @@ Uses FastApiMCP for Model Context Protocol integration.
 """
 
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Any
 from urllib.parse import urljoin, quote
+import hashlib
+import json
 
 import httpx
 from bs4 import BeautifulSoup
@@ -28,6 +30,10 @@ app = FastAPI(
 LANGCHAIN_DOCS_BASE = "https://python.langchain.com"
 GITHUB_API_BASE = "https://api.github.com/repos/langchain-ai/langchain"
 REQUEST_TIMEOUT = 30
+CACHE_TTL = 300  # 5 minutes
+
+# In-memory cache
+cache_store: Dict[str, Dict[str, Any]] = {}
 
 
 class DocSearchResult(BaseModel):
@@ -127,6 +133,31 @@ async def fetch_json(url: str, timeout: int = REQUEST_TIMEOUT) -> Optional[Dict]
     except (httpx.RequestError, httpx.HTTPStatusError) as error:
         print(f"Error fetching JSON from {url}: {error}")
         return None
+
+
+def get_cache_key(*args) -> str:
+    """Generate cache key from arguments."""
+    key_data = json.dumps(args, sort_keys=True)
+    return hashlib.md5(key_data.encode()).hexdigest()
+
+
+def get_cached_response(cache_key: str) -> Optional[Any]:
+    """Get cached response if not expired."""
+    if cache_key in cache_store:
+        cached_data = cache_store[cache_key]
+        if datetime.now() < cached_data['expires_at']:
+            return cached_data['data']
+        else:
+            del cache_store[cache_key]
+    return None
+
+
+def set_cached_response(cache_key: str, data: Any, ttl: int = CACHE_TTL) -> None:
+    """Cache response with TTL."""
+    cache_store[cache_key] = {
+        'data': data,
+        'expires_at': datetime.now() + timedelta(seconds=ttl)
+    }
 
 
 def extract_text_content(html: str, max_length: int = 200) -> str:
@@ -236,6 +267,11 @@ async def search_documentation(
     limit: int = Query(
         10, ge=1, le=20, description="Maximum number of results")
 ) -> List[DocSearchResult]:
+    # Check cache first
+    cache_key = get_cache_key("search_docs", query, limit)
+    cached_result = get_cached_response(cache_key)
+    if cached_result:
+        return cached_result
     """
     Search through real LangChain documentation using site search.
 
@@ -294,7 +330,9 @@ async def search_documentation(
                     last_updated=datetime.now().strftime("%Y-%m-%d")
                 ))
 
-        return results[:limit]
+        results = results[:limit]
+        set_cached_response(cache_key, results)
+        return results
 
     except (httpx.RequestError, httpx.HTTPStatusError) as error:
         raise HTTPException(
@@ -306,6 +344,11 @@ async def search_documentation(
          summary="Get real API reference for LangChain class",
          response_model=APIReference)
 async def get_api_reference(class_name: str) -> APIReference:
+    # Check cache first
+    cache_key = get_cache_key("api_reference", class_name)
+    cached_result = get_cached_response(cache_key)
+    if cached_result:
+        return APIReference(**cached_result)
     """
     Get real API reference for a LangChain class from GitHub source.
 
@@ -348,7 +391,7 @@ async def get_api_reference(class_name: str) -> APIReference:
         # Get module path from file path
         module_path = file_info['path'].replace('/', '.').replace('.py', '')
 
-        return APIReference(
+        result = APIReference(
             class_name=class_name,
             module_path=module_path,
             description=description or f"LangChain {class_name} class",
@@ -357,6 +400,8 @@ async def get_api_reference(class_name: str) -> APIReference:
             examples=[],
             source_url=file_url
         )
+        set_cached_response(cache_key, result.dict())
+        return result
 
     except HTTPException as http_error:
         raise http_error
@@ -376,6 +421,11 @@ async def get_github_examples(
     limit: int = Query(
         5, ge=1, le=10, description="Maximum number of examples")
 ) -> List[GitHubExample]:
+    # Check cache first
+    cache_key = get_cache_key("github_examples", query, limit)
+    cached_result = get_cached_response(cache_key)
+    if cached_result:
+        return cached_result
     """
     Get real code examples from the LangChain GitHub repository.
 
@@ -416,6 +466,7 @@ async def get_github_examples(
                     description=f"Example from {item['path']}"
                 ))
 
+        set_cached_response(cache_key, examples)
         return examples
 
     except (httpx.RequestError, httpx.HTTPStatusError) as error:
@@ -430,6 +481,11 @@ async def get_github_examples(
          summary="Get real LangChain tutorials from documentation",
          response_model=List[TutorialInfo])
 async def get_tutorials() -> List[TutorialInfo]:
+    # Check cache first
+    cache_key = get_cache_key("tutorials")
+    cached_result = get_cached_response(cache_key)
+    if cached_result:
+        return cached_result
     """
     Get real tutorials and guides from LangChain documentation.
 
@@ -490,7 +546,9 @@ async def get_tutorials() -> List[TutorialInfo]:
                 seen_urls.add(tutorial.url)
                 unique_tutorials.append(tutorial)
 
-        return unique_tutorials[:10]  # Limit to 10 tutorials
+        result = unique_tutorials[:10]  # Limit to 10 tutorials
+        set_cached_response(cache_key, result)
+        return result
 
     except (httpx.RequestError, httpx.HTTPStatusError) as error:
         raise HTTPException(
@@ -504,6 +562,11 @@ async def get_tutorials() -> List[TutorialInfo]:
          summary="Get latest LangChain version from PyPI",
          response_model=VersionInfo)
 async def get_latest_version() -> VersionInfo:
+    # Check cache first
+    cache_key = get_cache_key("latest_version")
+    cached_result = get_cached_response(cache_key)
+    if cached_result:
+        return VersionInfo(**cached_result)
     """
     Get the latest LangChain version information from PyPI.
 
@@ -533,7 +596,7 @@ async def get_latest_version() -> VersionInfo:
         if latest_release_info:
             upload_time = latest_release_info[0].get('upload_time_iso_8601')
 
-        return VersionInfo(
+        result = VersionInfo(
             latest_version=latest_version,
             description=info.get('summary', ''),
             author=info.get('author', ''),
@@ -543,6 +606,8 @@ async def get_latest_version() -> VersionInfo:
             pypi_url="https://pypi.org/project/langchain/",
             documentation_url=LANGCHAIN_DOCS_BASE
         )
+        set_cached_response(cache_key, result.dict())
+        return result
 
     except (httpx.RequestError, httpx.HTTPStatusError) as error:
         raise HTTPException(
@@ -565,7 +630,8 @@ def health_check() -> Dict[str, Any]:
         "status": "ok",
         "service": "LangChain Documentation MCP Server (Live Data)",
         "timestamp": datetime.now().isoformat(),
-        "endpoints_available": 7,
+        "endpoints_available": 8,
+        "cache_entries": len(cache_store),
         "data_sources": [
             "python.langchain.com",
             "github.com/langchain-ai/langchain",
@@ -582,6 +648,25 @@ def health_check() -> Dict[str, Any]:
     }
 
 
+@app.delete("/cache",
+           operation_id="clear_cache",
+           summary="Clear response cache")
+def clear_cache() -> Dict[str, Any]:
+    """
+    Clear all cached responses.
+
+    Returns:
+        Cache clear status
+    """
+    cleared_count = len(cache_store)
+    cache_store.clear()
+    return {
+        "status": "cleared",
+        "cleared_entries": cleared_count,
+        "timestamp": datetime.now().isoformat()
+    }
+
+
 @app.get("/search/api",
          operation_id="search_langchain_api",
          summary="Search LangChain API reference",
@@ -590,6 +675,11 @@ async def search_api_reference(
     query: str = Query(..., description="Search query for API reference"),
     limit: int = Query(5, ge=1, le=10, description="Maximum number of results")
 ) -> List[DocSearchResult]:
+    # Check cache first
+    cache_key = get_cache_key("search_api", query, limit)
+    cached_result = get_cached_response(cache_key)
+    if cached_result:
+        return cached_result
     """
     Search through LangChain API reference using the official search.
 
@@ -647,6 +737,7 @@ async def search_api_reference(
                         if len(results) >= limit:
                             break
 
+        set_cached_response(cache_key, results)
         return results
 
     except (httpx.RequestError, httpx.HTTPStatusError) as error:
