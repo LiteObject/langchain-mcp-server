@@ -1,0 +1,19 @@
+# Docker ignore file
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.so
+.pytest_cache/
+.coverage
+.venv/
+venv/
+.env
+.git/
+.gitignore
+README.md
+.dockerignore
+Dockerfile*
+docker-compose*
+*.md
