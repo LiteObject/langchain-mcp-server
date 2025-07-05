@@ -4,6 +4,8 @@ Core service layer for LangChain documentation operations.
 This module contains the shared business logic that can be used by both
 the FastAPI server and the MCP server implementations.
 """
+# pylint: disable=too-few-public-methods,too-many-arguments,too-many-positional-arguments
+# pylint: disable=too-many-instance-attributes,line-too-long,use-maxsplit-arg,too-many-nested-blocks
 
 import re
 from datetime import datetime

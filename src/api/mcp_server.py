@@ -9,12 +9,12 @@ import asyncio
 import json
 from typing import Any, Dict, List
 
+import mcp.server.stdio
+from mcp import types
 from mcp.server import Server
 from mcp.server.models import InitializationOptions
-import mcp.server.stdio
-import mcp.types as types
 
-from langchain_service import LangChainDocumentationService
+from ..services.langchain_service import LangChainDocumentationService
 
 
 # Initialize the MCP server
@@ -93,7 +93,7 @@ async def handle_read_resource(uri: str) -> str:
             "base_url": "https://python.langchain.com"
         }, indent=2)
 
-    elif uri == "langchain://api-reference":
+    if uri == "langchain://api-reference":
         return json.dumps({
             "description": "LangChain API Reference",
             "usage": "Use the get_api_reference tool with a class name",
@@ -101,29 +101,28 @@ async def handle_read_resource(uri: str) -> str:
             "github_source": "https://github.com/langchain-ai/langchain"
         }, indent=2)
 
-    elif uri == "langchain://tutorials":
+    if uri == "langchain://tutorials":
         tutorials = await doc_service.get_tutorials()
         return json.dumps({
             "description": "LangChain Tutorials and Guides",
             "tutorials": [tutorial.to_dict() for tutorial in tutorials]
         }, indent=2)
 
-    elif uri == "langchain://examples":
+    if uri == "langchain://examples":
         return json.dumps({
             "description": "LangChain Code Examples",
             "usage": "Use the get_github_examples tool to fetch real examples",
             "repository": "https://github.com/langchain-ai/langchain"
         }, indent=2)
 
-    elif uri == "langchain://version":
+    if uri == "langchain://version":
         version_info = await doc_service.get_latest_version()
         return json.dumps({
             "description": "LangChain Version Information",
             "version_info": version_info.to_dict()
         }, indent=2)
 
-    else:
-        raise ValueError(f"Unknown resource URI: {uri}")
+    raise ValueError(f"Unknown resource URI: {uri}")
 
 
 @server.list_tools()
@@ -185,7 +184,8 @@ async def handle_list_tools() -> List[types.Tool]:
                 "properties": {
                     "class_name": {
                         "type": "string",
-                        "description": "Name of the LangChain class (e.g., 'ChatOpenAI', 'LLMChain')"
+                        "description": ("Name of the LangChain class "
+                                        "(e.g., 'ChatOpenAI', 'LLMChain')")
                     }
                 },
                 "required": ["class_name"]
@@ -233,6 +233,177 @@ async def handle_list_tools() -> List[types.Tool]:
     ]
 
 
+async def _handle_search_docs(arguments: Dict[str, Any]) -> List[types.TextContent]:
+    """Handle search_docs tool call."""
+    query = arguments["query"]
+    limit = arguments.get("limit", 10)
+
+    results = await doc_service.search_documentation(query, limit)
+
+    if not results:
+        return [types.TextContent(
+            type="text",
+            text=f"No documentation found for query: '{query}'"
+        )]
+
+    # Format results for display
+    formatted_results = []
+    for result in results:
+        formatted_results.append(
+            f"**{result.title}** ({result.category})\n"
+            f"URL: {result.url}\n"
+            f"Summary: {result.summary}\n"
+        )
+
+    return [types.TextContent(
+        type="text",
+        text=f"Found {len(results)} documentation results for '{query}':\n\n" +
+             "\n---\n".join(formatted_results)
+    )]
+
+
+async def _handle_search_api_reference(arguments: Dict[str, Any]) -> List[types.TextContent]:
+    """Handle search_api_reference tool call."""
+    query = arguments["query"]
+    limit = arguments.get("limit", 5)
+
+    results = await doc_service.search_api_reference(query, limit)
+
+    if not results:
+        return [types.TextContent(
+            type="text",
+            text=f"No API reference found for query: '{query}'"
+        )]
+
+    # Format results for display
+    formatted_results = []
+    for result in results:
+        formatted_results.append(
+            f"**{result.title}**\n"
+            f"URL: {result.url}\n"
+            f"Description: {result.summary}\n"
+        )
+
+    return [types.TextContent(
+        type="text",
+        text=f"Found {len(results)} API reference results for '{query}':\n\n" +
+             "\n---\n".join(formatted_results)
+    )]
+
+
+async def _handle_get_api_reference(arguments: Dict[str, Any]) -> List[types.TextContent]:
+    """Handle get_api_reference tool call."""
+    class_name = arguments["class_name"]
+
+    try:
+        api_ref = await doc_service.get_api_reference(class_name)
+
+        methods_text = ", ".join(
+            api_ref.methods) if api_ref.methods else "No methods found"
+
+        response = (
+            f"**{api_ref.class_name}** API Reference\n\n"
+            f"**Module:** {api_ref.module_path}\n"
+            f"**Description:** {api_ref.description}\n"
+            f"**Methods:** {methods_text}\n"
+            f"**Source:** {api_ref.source_url}\n"
+        )
+
+        return [types.TextContent(type="text", text=response)]
+
+    except ValueError as e:
+        return [types.TextContent(
+            type="text",
+            text=f"Error getting API reference for '{class_name}': {str(e)}"
+        )]
+
+
+async def _handle_get_github_examples(arguments: Dict[str, Any]) -> List[types.TextContent]:
+    """Handle get_github_examples tool call."""
+    query = arguments.get("query")
+    limit = arguments.get("limit", 5)
+
+    examples = await doc_service.get_github_examples(query, limit)
+
+    if not examples:
+        search_term = f" for '{query}'" if query else ""
+        return [types.TextContent(
+            type="text",
+            text=f"No code examples found{search_term}"
+        )]
+
+    # Format examples for display
+    formatted_examples = []
+    for example in examples:
+        # Truncate content if too long
+        content = example.content
+        if len(content) > 500:
+            content = content[:500] + \
+                "...\n\n[Content truncated - see full example at URL]"
+
+        formatted_examples.append(
+            f"**{example.filename}**\n"
+            f"Description: {example.description}\n"
+            f"URL: {example.url}\n"
+            f"```python\n{content}\n```"
+        )
+
+    search_info = f" for '{query}'" if query else ""
+    return [types.TextContent(
+        type="text",
+        text=f"Found {len(examples)} code examples{search_info}:\n\n" +
+             "\n\n---\n\n".join(formatted_examples)
+    )]
+
+
+async def _handle_get_tutorials(arguments: Dict[str, Any]) -> List[types.TextContent]:  # pylint: disable=unused-argument
+    """Handle get_tutorials tool call."""
+    tutorials = await doc_service.get_tutorials()
+
+    if not tutorials:
+        return [types.TextContent(
+            type="text",
+            text="No tutorials found"
+        )]
+
+    # Format tutorials for display
+    formatted_tutorials = []
+    for tutorial in tutorials:
+        formatted_tutorials.append(
+            f"**{tutorial.title}** ({tutorial.category})\n"
+            f"Description: {tutorial.description}\n"
+            f"URL: {tutorial.url}\n"
+            f"Topics: {', '.join(tutorial.topics)}"
+        )
+
+    return [types.TextContent(
+        type="text",
+        text=f"Found {len(tutorials)} LangChain tutorials:\n\n" +
+             "\n\n---\n\n".join(formatted_tutorials)
+    )]
+
+
+async def _handle_get_latest_version(arguments: Dict[str, Any]) -> List[types.TextContent]:  # pylint: disable=unused-argument
+    """Handle get_latest_version tool call."""
+    version_info = await doc_service.get_latest_version()
+
+    response = (
+        f"**LangChain Version Information**\n\n"
+        f"**Latest Version:** {version_info.latest_version}\n"
+        f"**Description:** {version_info.description}\n"
+        f"**Author:** {version_info.author}\n"
+        f"**Homepage:** {version_info.homepage}\n"
+        f"**Python Requirements:** {version_info.python_requires}\n"
+        f"**PyPI URL:** {version_info.pypi_url}\n"
+        f"**Documentation:** {version_info.documentation_url}\n"
+    )
+
+    if version_info.release_date:
+        response += f"**Release Date:** {version_info.release_date}\n"
+
+    return [types.TextContent(type="text", text=response)]
+
+
 @server.call_tool()
 async def handle_call_tool(name: str, arguments: Dict[str, Any]) -> List[types.TextContent]:
     """
@@ -246,172 +417,25 @@ async def handle_call_tool(name: str, arguments: Dict[str, Any]) -> List[types.T
         List of text content responses
     """
     try:
-        if name == "search_docs":
-            query = arguments["query"]
-            limit = arguments.get("limit", 10)
+        # Use a dictionary to map tool names to handler functions
+        handlers = {
+            "search_docs": _handle_search_docs,
+            "search_api_reference": _handle_search_api_reference,
+            "get_api_reference": _handle_get_api_reference,
+            "get_github_examples": _handle_get_github_examples,
+            "get_tutorials": _handle_get_tutorials,
+            "get_latest_version": _handle_get_latest_version,
+        }
 
-            results = await doc_service.search_documentation(query, limit)
+        if name in handlers:
+            return await handlers[name](arguments)
 
-            if not results:
-                return [types.TextContent(
-                    type="text",
-                    text=f"No documentation found for query: '{query}'"
-                )]
+        return [types.TextContent(
+            type="text",
+            text=f"Unknown tool: {name}"
+        )]
 
-            # Format results for display
-            formatted_results = []
-            for result in results:
-                formatted_results.append(
-                    f"**{result.title}** ({result.category})\n"
-                    f"URL: {result.url}\n"
-                    f"Summary: {result.summary}\n"
-                )
-
-            return [types.TextContent(
-                type="text",
-                text=f"Found {len(results)} documentation results for '{query}':\n\n" +
-                     "\n---\n".join(formatted_results)
-            )]
-
-        elif name == "search_api_reference":
-            query = arguments["query"]
-            limit = arguments.get("limit", 5)
-
-            results = await doc_service.search_api_reference(query, limit)
-
-            if not results:
-                return [types.TextContent(
-                    type="text",
-                    text=f"No API reference found for query: '{query}'"
-                )]
-
-            # Format results for display
-            formatted_results = []
-            for result in results:
-                formatted_results.append(
-                    f"**{result.title}**\n"
-                    f"URL: {result.url}\n"
-                    f"Description: {result.summary}\n"
-                )
-
-            return [types.TextContent(
-                type="text",
-                text=f"Found {len(results)} API reference results for '{query}':\n\n" +
-                     "\n---\n".join(formatted_results)
-            )]
-
-        elif name == "get_api_reference":
-            class_name = arguments["class_name"]
-
-            try:
-                api_ref = await doc_service.get_api_reference(class_name)
-
-                methods_text = ", ".join(
-                    api_ref.methods) if api_ref.methods else "No methods found"
-
-                response = (
-                    f"**{api_ref.class_name}** API Reference\n\n"
-                    f"**Module:** {api_ref.module_path}\n"
-                    f"**Description:** {api_ref.description}\n"
-                    f"**Methods:** {methods_text}\n"
-                    f"**Source:** {api_ref.source_url}\n"
-                )
-
-                return [types.TextContent(type="text", text=response)]
-
-            except ValueError as e:
-                return [types.TextContent(
-                    type="text",
-                    text=f"Error getting API reference for '{class_name}': {str(e)}"
-                )]
-
-        elif name == "get_github_examples":
-            query = arguments.get("query")
-            limit = arguments.get("limit", 5)
-
-            examples = await doc_service.get_github_examples(query, limit)
-
-            if not examples:
-                search_term = f" for '{query}'" if query else ""
-                return [types.TextContent(
-                    type="text",
-                    text=f"No code examples found{search_term}"
-                )]
-
-            # Format examples for display
-            formatted_examples = []
-            for example in examples:
-                # Truncate content if too long
-                content = example.content
-                if len(content) > 500:
-                    content = content[:500] + \
-                        "...\n\n[Content truncated - see full example at URL]"
-
-                formatted_examples.append(
-                    f"**{example.filename}**\n"
-                    f"Description: {example.description}\n"
-                    f"URL: {example.url}\n"
-                    f"```python\n{content}\n```"
-                )
-
-            search_info = f" for '{query}'" if query else ""
-            return [types.TextContent(
-                type="text",
-                text=f"Found {len(examples)} code examples{search_info}:\n\n" +
-                     "\n\n---\n\n".join(formatted_examples)
-            )]
-
-        elif name == "get_tutorials":
-            tutorials = await doc_service.get_tutorials()
-
-            if not tutorials:
-                return [types.TextContent(
-                    type="text",
-                    text="No tutorials found"
-                )]
-
-            # Format tutorials for display
-            formatted_tutorials = []
-            for tutorial in tutorials:
-                formatted_tutorials.append(
-                    f"**{tutorial.title}** ({tutorial.category})\n"
-                    f"Description: {tutorial.description}\n"
-                    f"URL: {tutorial.url}\n"
-                    f"Topics: {', '.join(tutorial.topics)}"
-                )
-
-            return [types.TextContent(
-                type="text",
-                text=f"Found {len(tutorials)} LangChain tutorials:\n\n" +
-                     "\n\n---\n\n".join(formatted_tutorials)
-            )]
-
-        elif name == "get_latest_version":
-            version_info = await doc_service.get_latest_version()
-
-            response = (
-                f"**LangChain Version Information**\n\n"
-                f"**Latest Version:** {version_info.latest_version}\n"
-                f"**Description:** {version_info.description}\n"
-                f"**Author:** {version_info.author}\n"
-                f"**Homepage:** {version_info.homepage}\n"
-                f"**Python Requirements:** {version_info.python_requires}\n"
-                f"**PyPI URL:** {version_info.pypi_url}\n"
-                f"**Documentation:** {version_info.documentation_url}\n"
-            )
-
-            if version_info.release_date:
-                response += f"**Release Date:** {version_info.release_date}\n"
-
-            return [types.TextContent(type="text", text=response)]
-
-        else:
-            return [types.TextContent(
-                type="text",
-                text=f"Unknown tool: {name}"
-            )]
-
-    except Exception as e:
+    except Exception as e:  # pylint: disable=broad-exception-caught
         return [types.TextContent(
             type="text",
             text=f"Error calling tool '{name}': {str(e)}"
